@@ -7,11 +7,11 @@
  *	compliance with the license. Any of the license terms and conditions
  *	can be waived if you get permission from the copyright holder.
  *
- *	Copyright (c) 2019 ~ ikkez
+ *	Copyright (c) 2020 ~ ikkez
  *	Christian Knuth <ikkez0n3@gmail.com>
  *
- *	@version: 1.1.7
- *	@date: 18.02.2019
+ *	@version: 1.2.2
+ *	@date: 28.02.2021
  *	@since: 08.08.2014
  *
  **/
@@ -36,7 +36,7 @@ class Assets extends Prefab {
 	public function __construct(\Template $template=NULL) {
 		$this->template = $template ?: \Template::instance();
 		$f3 = $this->f3 = \Base::instance();
-		$minifyComplier = function($fileName,$path) {
+		$minifyCompiler = function($fileName,$path) {
 			return \Web::instance()->minify($fileName,null,false,$path);
 		};
 		$opt_defaults = array(
@@ -61,8 +61,8 @@ class Assets extends Prefab {
 				'exclude'=>'.*(.min.).*',
 				'inline'=>false,
 				'compiler'=>[
-					'js'=>$minifyComplier,
-					'css'=>$minifyComplier,
+					'js'=>$minifyCompiler,
+					'css'=>$minifyCompiler,
 				]
 			),
 			'fixRelativePaths'=>'relative',
@@ -83,17 +83,18 @@ class Assets extends Prefab {
 				$f3->copy('ASSETS.public_path','ASSETS.minify.public_path');
 		}
 		$self = $this;
-		$this->formatter=array(
+		$this->formatter=[
 			'js'=>function($asset) use($f3,$self){
-				if ($asset['origin']=='inline')
-					return sprintf('<script>%s</script>',$asset['data']);
-				else
-					$asset['charset']=$f3->get('ENCODING');
-				$path = $asset['path'];
-				unset($asset['path'],$asset['origin'],$asset['type'],
-					$asset['exclude'],$asset['slot']);
-				$params=$self->resolveAttr($asset+array('src'=>$path));
-				return sprintf('<script%s></script>',$params);
+				$attr = $asset;
+				unset($attr['path'],$attr['origin'],$attr['type'],
+					$attr['exclude'],$attr['slot'],$attr['data']);
+				if ($asset['origin']=='inline') {
+					$params=$self->resolveAttr($attr);
+					return sprintf('<script%s>%s</script>',$params,$asset['data']);
+				} else {
+					$params=$self->resolveAttr($attr+['src'=>$asset['path']]);
+					return sprintf('<script%s></script>',$params);
+				}
 			},
 			'css'=>function($asset) use($f3,$self) {
 				if ($asset['origin']=='inline')
@@ -101,18 +102,18 @@ class Assets extends Prefab {
 				$path = $asset['path'];
 				unset($asset['path'],$asset['origin'],$asset['type'],
 					$asset['exclude'],$asset['slot']);
-				$params=$self->resolveAttr($asset+array(
+				$params=$self->resolveAttr($asset+[
 					'rel'=>'stylesheet',
 					'type'=>'text/css',
 					'href'=>$path,
-				));
+					]);
 				return sprintf('<link%s/>',$params);
 			}
-		);
-		$this->filter=array(
-			'combine'=>array($this,'combine'),
-			'minify'=>array($this,'minify')
-		);
+		];
+		$this->filter=[
+			'combine'=>[$this,'combine'],
+			'minify'=>[$this,'minify']
+		];
 		$this->reset();
 		if ($f3->get('ASSETS.auto_include')) {
 			$this->template->extend('head', 'Assets::renderHeadTag');
@@ -208,6 +209,16 @@ class Assets extends Prefab {
 		return $assets;
 	}
 
+	protected function getPublicPath() {
+		if ($this->f3->get('ASSETS.trim_public_root')) {
+			$basePath=$this->f3->fixslashes(realpath($this->f3->fixslashes(
+				$_SERVER['DOCUMENT_ROOT'].$this->f3->get('BASE'))));
+			$cDir=$this->f3->fixslashes(getcwd());
+			return str_replace($cDir,'',$basePath);
+		}
+		return FALSE;
+	}
+
 	/**
 	 * render asset group
 	 * @param array $assets
@@ -215,12 +226,7 @@ class Assets extends Prefab {
 	 */
 	public function renderGroup($assets) {
 		$out = array();
-		if ($this->f3->get('ASSETS.trim_public_root')) {
-			$basePath=$this->f3->fixslashes(realpath($this->f3->fixslashes(
-				$_SERVER['DOCUMENT_ROOT'].$this->f3->get('BASE'))));
-			$cDir=$this->f3->fixslashes(getcwd());
-			$trimPublicDir=str_replace($cDir,'',$basePath);
-		}
+		$trimPublicDir=$this->getPublicPath();
 		foreach($assets as $asset_type=>$collection) {
 			if ($this->f3->exists('ASSETS.filter.'.$asset_type,$filters)) {
 				if (is_string($filters))
@@ -233,11 +239,14 @@ class Assets extends Prefab {
 				if (isset($asset['path'])) {
 					$path = $asset['path'];
 					$mtime = ($this->f3->get('ASSETS.timestamps') && $asset['origin']!='external'
-						&& is_file($path)) ? '?'.filemtime($path) : '';
+						&& @is_file($path)) ? '?'.filemtime($path) : '';
 					$base = ($this->f3->get('ASSETS.prepend_base') && $asset['origin']!='external'
-						&& is_file($path)) ? $this->f3->get('BASE').'/': '';
-					if (isset($trimPublicDir) && $asset['origin']!='external')
-						$path = substr($path,strlen($trimPublicDir));
+						&& @is_file($path)) ? $this->f3->get('BASE').'/': '';
+					if ($trimPublicDir && $asset['origin']!='external') {
+						$trimPath=trim($trimPublicDir,'/').'/';
+						if (strpos($path,$trimPath)===0)
+							$path = substr($path,strlen($trimPublicDir));
+					}
 					$asset['path'] = $base.$path.$mtime;
 				}
 				$out[]=$this->f3->call($this->formatter[$asset_type],array($asset));
@@ -415,7 +424,7 @@ class Assets extends Prefab {
 					$filename = $hash.'.min.'.$type;
 					if (!is_file($public_path.$filename)) {
 						$this->f3->write($public_path.$filename,$data);
-						$min = $web->minify($filename,null,false,
+						$min = \Web::instance()->minify($filename,null,false,
 							$public_path);
 						$this->f3->write($public_path.$filename,$min);
 					}
@@ -455,6 +464,9 @@ class Assets extends Prefab {
 			// fix base path (resolve symbolic links)
 			$basePath=$f3->fixslashes(realpath(
 				$f3->fixslashes($_SERVER['DOCUMENT_ROOT'].$webBase)).DIRECTORY_SEPARATOR);
+			if ($this->f3->get('ASSETS.trim_public_root')) {
+				$basePath=getcwd();
+			}
 			// parse content for URLs
 			$content=preg_replace_callback(
 				'/\b(?<=url)\((?:([\"\']?)(.+?)((\?.*?)?)\1)\)/s',
@@ -467,6 +479,7 @@ class Assets extends Prefab {
 						// relative from new public file path
 						$filePathFromBase=str_replace($basePath,'',$f3->fixslashes($rPath));
 						$rel=$this->relPath($targetDir,$filePathFromBase);
+						$rel=$this->trimPublicPath($rel);
 						return '('.$url[1].$rel.(isset($url[4])?$url[4]:'').$url[1].')';
 					} elseif ($method=='absolute') {
 						// absolute to web root / base
@@ -479,6 +492,18 @@ class Assets extends Prefab {
 				},$content);
 		}
 		return $content;
+	}
+
+	protected function trimPublicPath($path) {
+		$trimPath=$this->f3->get('ASSETS.trim_public_root');
+		if ($trimPath===true) {
+			$cDir=$this->f3->fixslashes(getcwd());
+			$public_path=str_replace($cDir,'',$this->f3->ROOT);
+			$path=str_replace($public_path,'',$path);
+		} elseif (!empty($trimPath)) {
+			$path=str_replace($trimPath,'',$path);
+		}
+		return $path;
 	}
 
 	/**
@@ -518,14 +543,14 @@ class Assets extends Prefab {
 	 */
 	public function add($path,$type,$group='head',$priority=5,$slot=null,$params=null) {
 		if (!isset($this->assets[$group]))
-			$this->assets[$group]=array();
+			$this->assets[$group]=[];
 		if (!isset($this->assets[$group][$type]))
-			$this->assets[$group][$type]=array();
-		$asset = array(
+			$this->assets[$group][$type]=[];
+		$asset = [
 			'path'=>$path,
 			'type'=>$type,
 			'slot'=>$slot
-		) + ($params?:array());
+			] + ($params?:[]);
 		if (preg_match('/^(http(s)?:)?\/\/.*/i',$path)) {
 			$asset['origin'] = 'external';
 			$this->assets[$group][$type][$priority][]=$asset;
@@ -540,7 +565,7 @@ class Assets extends Prefab {
 			}
 		// file not found
 		if ($handler=$this->f3->get('ASSETS.onFileNotFound'))
-			$this->f3->call($handler,array($path,$this));
+			$this->f3->call($handler,[$path,$this]);
 		// mark unknown file as external
 		$asset['origin'] = 'external';
 		$this->assets[$group][$type][$priority][]=$asset;
@@ -575,23 +600,23 @@ class Assets extends Prefab {
 	 * @param string $group
 	 * @param string $slot
 	 */
-	public function addInline($content,$type,$group='head',$slot='inline') {
+	public function addInline($content,$type,$group='head',$slot='inline',$attr=[]) {
 		if (!isset($this->assets[$group]))
-			$this->assets[$group]=array();
+			$this->assets[$group]=[];
 		if (!isset($this->assets[$group][$type]))
-			$this->assets[$group][$type]=array();
-		$this->assets[$group][$type][3][]=array(
+			$this->assets[$group][$type]=[];
+		$data = [
 			'data'=>$content,
 			'type'=>$type,
 			'origin'=>'inline',
 			'slot'=>$slot,
-		);
+		];
+		$this->assets[$group][$type][3][]=$data+$attr;
 	}
 
 	/**
 	 * push new asset during template execution
 	 * @param $node
-	 * @return string
 	 */
 	public function addNode($node) {
 		$src=false;
@@ -611,7 +636,7 @@ class Assets extends Prefab {
 					$node['type'] = 'css';
 				elseif(empty($type))
 					// unknown file type
-					return "";
+					return;
 			}
 			$type = $node['type'];
 			// default slot is based on the type
@@ -638,44 +663,54 @@ class Assets extends Prefab {
 	 */
 	function parseNode($node) {
 		$src=false;
-		$params = array();
+		$attr = [];
 		if (isset($node['@attrib'])) {
-			$params = $node['@attrib'];
+			$attr = $node['@attrib'];
 			unset($node['@attrib']);
 		}
 		// find src
-		if (array_key_exists('src',$params))
-			$src = $params['src'];
-		elseif (array_key_exists('href',$params))
-			$src = $params['href'];
+		if (array_key_exists('src',$attr))
+			$src = $attr['src'];
+		elseif (array_key_exists('href',$attr))
+			$src = $attr['href'];
 		if ($src) {
 			$out = '<?php \Assets::instance()->addNode(array(';
-			foreach($params as $key=>$val)
+			foreach($attr as $key=>$val)
 				$out.=var_export($key,true).'=>'.(preg_match('/{{(.+?)}}/s',$val)
 					?$this->template->token($val):var_export($val,true)).',';
 			$out.=')); ?>';
 			return $out;
 		}
 		// inner content
-		if (isset($node[0]) && isset($params['type'])) {
-			if (!isset($params['group']))
-				$params['group'] = ($params['type'] == 'js')
+		if (isset($node[0]) && isset($attr['type'])) {
+			if (!isset($attr['group']))
+				$attr['group'] = ($attr['type'] == 'js')
 					? 'footer' : 'head';
-			if (!isset($params['slot']))
-				$params['slot'] = 'inline';
-			if ($this->f3->get('ASSETS.handle_inline'))
+			if (!isset($attr['slot']))
+				$attr['slot'] = 'inline';
+			if ($this->f3->get('ASSETS.handle_inline') && (!isset($attr['handle']) || $attr['handle']=='true')) {
+				$opt=[
+					'type'=>$attr['type'],
+					'group'=>$attr['group'],
+					'slot'=>$attr['slot'],
+				];
+				unset($attr['type'],$attr['group'],$attr['slot'],$attr['handle']);
 				return '<?php \Assets::instance()->addInline('.
 				'$this->resolve('.(var_export($node,true)).
 					',get_defined_vars(),0,false,false),'.
-				var_export($params['type'],true).','.
-				var_export($params['group'],true).','.
-				var_export($params['slot'],true).'); ?>';
-			else
+				var_export($opt['type'],true).','.
+				var_export($opt['group'],true).','.
+				var_export($opt['slot'],true).','.
+				var_export($attr,true).'); ?>';
+			}
+			else {
+				unset($attr['group'],$attr['slot'],$attr['handle']);
 				// just bypass
-				return $this->f3->call($this->formatter[$params['type']],array(array(
+				return $this->f3->call($this->formatter[$attr['type']],[[
 					'data'=>$this->template->build($node),
 					'origin'=>'inline'
-				)));
+				]+$attr]);
+			}
 		}
 	}
 
@@ -732,9 +767,27 @@ class Assets extends Prefab {
 	 */
 	static public function renderScriptTag(array $node) {
 		if (!isset($node['@attrib']))
-			$node['@attrib'] = array();
-		$node['@attrib']['type']='js';
-		return static::renderAssetTag($node);
+			$node['@attrib'] = [];
+		if (!isset($node['@attrib']['type']) || $node['@attrib']['type'] == 'text/javascript') {
+			$node['@attrib']['type']='js';
+			return static::renderAssetTag($node);
+		} else {
+			// skip and render them directly
+			$as=\Assets::instance();
+			$params = '';
+			if (isset($node['@attrib'])) {
+				$params = $as->resolveAttr($node['@attrib']);
+				unset($node['@attrib']);
+			}
+			$content = [];
+			// bypass inner content nodes
+			foreach ($node as $el)
+				$content[] = $as->template->build($el);
+			if ($content)
+				return "\t".'<script'.$params.'>'.implode("\n", $content)."\n".'</script>';
+			else
+				return "\t".'<script'.$params.' />';
+		}
 	}
 
 	/**
@@ -745,7 +798,8 @@ class Assets extends Prefab {
 	static public function renderStyleTag(array $node) {
 		if (!isset($node['@attrib']))
 			$node['@attrib'] = array();
-		$node['@attrib']['type']='css';
+		if (!isset($node['@attrib']['type']) || $node['@attrib']['type'] == 'text/css')
+			$node['@attrib']['type']='css';
 		return static::renderAssetTag($node);
 	}
 
